@@ -242,6 +242,72 @@ func TestSearchSoftBoxFilter(t *testing.T) {
 	}
 }
 
+func TestSearchSoftBoxScoreThreshold(t *testing.T) {
+	db, err := New(1)
+	if err != nil {
+		t.Fatalf("new db: %v", err)
+	}
+	for _, item := range []struct {
+		vector []float32
+		text   string
+	}{
+		{[]float32{0}, "inside"},
+		{[]float32{0.13}, "near outside"},
+		{[]float32{0.2}, "far outside"},
+	} {
+		if _, err := db.Insert(item.vector, item.text, nil); err != nil {
+			t.Fatalf("insert %q: %v", item.text, err)
+		}
+	}
+
+	threshold := float32(0.05)
+	results, err := db.SearchSoftBox([]float32{0}, SoftBoxSearchOptions{
+		Minus:          []float32{0.1},
+		Plus:           []float32{0.1},
+		ScoreThreshold: &threshold,
+		TopK:           5,
+	})
+	if err != nil {
+		t.Fatalf("search soft box: %v", err)
+	}
+
+	got := make([]string, len(results))
+	for i, result := range results {
+		got[i] = result.Record.Text
+	}
+	want := []string{"inside", "near outside"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("thresholded soft box results = %v, want %v", got, want)
+	}
+}
+
+func TestSearchSoftBoxZeroScoreThreshold(t *testing.T) {
+	db, err := New(1)
+	if err != nil {
+		t.Fatalf("new db: %v", err)
+	}
+	if _, err := db.Insert([]float32{0}, "inside", nil); err != nil {
+		t.Fatalf("insert inside: %v", err)
+	}
+	if _, err := db.Insert([]float32{0.2}, "outside", nil); err != nil {
+		t.Fatalf("insert outside: %v", err)
+	}
+
+	threshold := float32(0)
+	results, err := db.SearchSoftBox([]float32{0}, SoftBoxSearchOptions{
+		Minus:          []float32{0.1},
+		Plus:           []float32{0.1},
+		ScoreThreshold: &threshold,
+		TopK:           5,
+	})
+	if err != nil {
+		t.Fatalf("search soft box: %v", err)
+	}
+	if len(results) != 1 || results[0].Record.Text != "inside" {
+		t.Fatalf("zero threshold results = %+v, want inside only", results)
+	}
+}
+
 func TestTimestampFilter(t *testing.T) {
 	db, err := New(1)
 	if err != nil {
@@ -316,6 +382,10 @@ func TestValidation(t *testing.T) {
 	}
 	if _, err := db.SearchSoftBox([]float32{1, 2}, SoftBoxSearchOptions{Minus: []float32{1, 1}, Plus: []float32{1, 1}, Weights: []float32{0, 0}, TopK: 1}); err == nil {
 		t.Fatal("expected soft zero weight sum validation")
+	}
+	badSoftThreshold := float32(-1)
+	if _, err := db.SearchSoftBox([]float32{1, 2}, SoftBoxSearchOptions{Minus: []float32{1, 1}, Plus: []float32{1, 1}, ScoreThreshold: &badSoftThreshold, TopK: 1}); err == nil {
+		t.Fatal("expected soft score threshold validation")
 	}
 	if _, err := db.SearchSoftBox([]float32{1, 2}, SoftBoxSearchOptions{Minus: []float32{1, 1}, Plus: []float32{1, 1}}); err == nil {
 		t.Fatal("expected soft topK validation")

@@ -48,5 +48,13 @@ box instead of requiring containment:
 score = sum(weight[d] * max(0, lower[d] - x[d], x[d] - upper[d])) / sum(weight)
 ```
 
-Lower scores rank first, and callers can optionally break equal-score ties by
-anchor distance to the query vector.
+Lower scores rank first. A score of `0` means the vector is fully inside the
+box. `SoftBoxSearchOptions.ScoreThreshold` can be set to filter records whose
+soft-box violation is too large; leave it `nil` for forced top-k retrieval.
+Callers can optionally break equal-score ties by anchor distance to the query
+vector.
+
+For the Hippo encoder region benchmark, the strongest default was the plain
+mean-overflow score above, not max-overflow or L2-added variants. A practical
+retrieval profile is `TopK: 20` for recall-oriented search, optionally with
+`ScoreThreshold: 0.005` when the caller wants a precision-filtered set.

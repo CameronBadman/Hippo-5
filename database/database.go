@@ -55,6 +55,7 @@ type SoftBoxSearchOptions struct {
 	Minus                    []float32
 	Plus                     []float32
 	Weights                  []float32
+	ScoreThreshold           *float32
 	TopK                     int
 	Filter                   *Filter
 	TieBreakByAnchorDistance bool
@@ -278,8 +279,9 @@ func (db *DB) SearchBox(query []float32, opts BoxSearchOptions) ([]Result, error
 //
 //	sum(weight_i * max(0, lower_i - x_i, x_i - upper_i)) / sum(weight_i)
 //
-// Lower scores are better. When TieBreakByAnchorDistance is true, equal scores
-// are ordered by Euclidean distance to query.
+// Lower scores are better. ScoreThreshold filters out records with scores above
+// the threshold when set. When TieBreakByAnchorDistance is true, equal scores are
+// ordered by Euclidean distance to query.
 func (db *DB) SearchSoftBox(query []float32, opts SoftBoxSearchOptions) ([]Result, error) {
 	if db == nil {
 		return nil, fmt.Errorf("nil database")
@@ -303,6 +305,9 @@ func (db *DB) SearchSoftBox(query []float32, opts SoftBoxSearchOptions) ([]Resul
 		}
 
 		score := softBoxScore(query, record.Vector, opts.Minus, opts.Plus, opts.Weights, weightSum)
+		if opts.ScoreThreshold != nil && score > *opts.ScoreThreshold {
+			continue
+		}
 		result := Result{
 			Record:     copyRecord(record),
 			Score:      score,
@@ -380,6 +385,12 @@ func (db *DB) validateSoftBoxOptions(opts SoftBoxSearchOptions) (float32, error)
 	}
 	if opts.Weights != nil && len(opts.Weights) != db.dimensions {
 		return 0, fmt.Errorf("weights dimension mismatch: expected %d, got %d", db.dimensions, len(opts.Weights))
+	}
+	if opts.ScoreThreshold != nil {
+		threshold := *opts.ScoreThreshold
+		if math.IsNaN(float64(threshold)) || math.IsInf(float64(threshold), 0) || threshold < 0 {
+			return 0, fmt.Errorf("score threshold must be finite and non-negative")
+		}
 	}
 	if opts.TopK <= 0 {
 		return 0, fmt.Errorf("topK must be positive")
