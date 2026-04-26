@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"hippo5/internal/simd"
 	"hippo5/internal/vectorindex"
 )
 
@@ -165,10 +166,11 @@ func (db *DB) Search(query []float32, opts SearchOptions) ([]Result, error) {
 			continue
 		}
 
-		distance := euclideanDistance(query, record.Vector)
-		if distance > maxDistance {
+		distanceSquared := simd.SquaredL2(query, record.Vector)
+		if distanceSquared > maxDistance*maxDistance {
 			continue
 		}
+		distance := float32(math.Sqrt(float64(distanceSquared)))
 
 		results = append(results, Result{
 			Record:     copyRecord(record),
@@ -219,15 +221,6 @@ func (record Record) matches(filter *Filter) bool {
 		}
 	}
 	return true
-}
-
-func euclideanDistance(a, b []float32) float32 {
-	var sum float32
-	for i := range a {
-		diff := a[i] - b[i]
-		sum += diff * diff
-	}
-	return float32(math.Sqrt(float64(sum)))
 }
 
 func similarity(distance float32, epsilon float32, dimensions int) float32 {

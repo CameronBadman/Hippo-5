@@ -26,6 +26,7 @@ The intended search flow is:
 - one skiplist-backed coordinate index per dimension
 - incremental inserts without shifting sorted slices
 - exact epsilon-box candidate search followed by Euclidean scoring
+- SIMD-accelerated squared L2 scoring on amd64 with a pure-Go fallback
 - binary save/load that rebuilds indexes on open
 
 The tradeoff is intentional: skiplists use more memory than dense sorted
