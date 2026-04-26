@@ -1,6 +1,9 @@
 package vectorindex
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // DimensionIndex maintains one ordered skiplist per vector dimension.
 type DimensionIndex struct {
@@ -78,6 +81,40 @@ func (idx *DimensionIndex) CandidateCounts(query []float32, epsilon float32) (ma
 	for dim, value := range query {
 		matches = matches[:0]
 		matches = idx.lists[dim].Range(value-epsilon, value+epsilon, matches)
+		for _, nodeID := range matches {
+			counts[nodeID]++
+		}
+	}
+	return counts, nil
+}
+
+// CandidateCountsInBox counts how many dimensions each node matched for an
+// asymmetric per-dimension box around query.
+func (idx *DimensionIndex) CandidateCountsInBox(query []float32, minus []float32, plus []float32) (map[int32]int, error) {
+	if idx == nil {
+		return nil, fmt.Errorf("nil dimension index")
+	}
+	if len(query) != idx.dimensions {
+		return nil, fmt.Errorf("dimension mismatch: expected %d, got %d", idx.dimensions, len(query))
+	}
+	if len(minus) != idx.dimensions {
+		return nil, fmt.Errorf("minus dimension mismatch: expected %d, got %d", idx.dimensions, len(minus))
+	}
+	if len(plus) != idx.dimensions {
+		return nil, fmt.Errorf("plus dimension mismatch: expected %d, got %d", idx.dimensions, len(plus))
+	}
+
+	counts := make(map[int32]int)
+	var matches []int32
+	for dim, value := range query {
+		if math.IsNaN(float64(minus[dim])) || math.IsInf(float64(minus[dim]), 0) || minus[dim] < 0 {
+			return nil, fmt.Errorf("minus[%d] must be finite and non-negative", dim)
+		}
+		if math.IsNaN(float64(plus[dim])) || math.IsInf(float64(plus[dim]), 0) || plus[dim] < 0 {
+			return nil, fmt.Errorf("plus[%d] must be finite and non-negative", dim)
+		}
+		matches = matches[:0]
+		matches = idx.lists[dim].Range(value-minus[dim], value+plus[dim], matches)
 		for _, nodeID := range matches {
 			counts[nodeID]++
 		}

@@ -26,9 +26,17 @@ The intended search flow is:
 - one skiplist-backed coordinate index per dimension
 - incremental inserts without shifting sorted slices
 - exact epsilon-box candidate search followed by Euclidean scoring
+- asymmetric per-dimension box search for tuned region generators
 - SIMD-accelerated squared L2 scoring on amd64 with a pure-Go fallback
 - binary save/load that rebuilds indexes on open
 
 The tradeoff is intentional: skiplists use more memory than dense sorted
 `[]int32` arrays, but inserts are easier to keep online because each dimension
 gets O(log n) pointer updates instead of slice insertion and shifting.
+
+Symmetric search uses one global epsilon for every dimension. Box search accepts
+per-dimension `Minus` and `Plus` widths, so dimension `d` searches:
+
+```text
+query[d] - Minus[d] <= value <= query[d] + Plus[d]
+```

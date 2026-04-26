@@ -41,6 +41,15 @@ type SearchOptions struct {
 	Filter    *Filter
 }
 
+// BoxSearchOptions controls asymmetric per-dimension box search.
+type BoxSearchOptions struct {
+	Minus     []float32
+	Plus      []float32
+	Threshold float32
+	TopK      int
+	Filter    *Filter
+}
+
 // Result is one scored search hit.
 type Result struct {
 	Record     Record
@@ -192,6 +201,66 @@ func (db *DB) Search(query []float32, opts SearchOptions) ([]Result, error) {
 	return results, nil
 }
 
+// SearchBox returns the nearest records inside an asymmetric per-dimension box.
+func (db *DB) SearchBox(query []float32, opts BoxSearchOptions) ([]Result, error) {
+	if db == nil {
+		return nil, fmt.Errorf("nil database")
+	}
+	if err := db.validateVector(query); err != nil {
+		return nil, err
+	}
+	if err := db.validateBoxOptions(opts); err != nil {
+		return nil, err
+	}
+	if len(db.records) == 0 {
+		return nil, nil
+	}
+
+	counts, err := db.index.CandidateCountsInBox(query, opts.Minus, opts.Plus)
+	if err != nil {
+		return nil, err
+	}
+
+	boxDistance := boxMaxDistance(opts.Minus, opts.Plus)
+	maxDistance := boxDistance * (1 - opts.Threshold)
+	results := make([]Result, 0, opts.TopK)
+
+	for id, count := range counts {
+		if count != db.dimensions || int(id) >= len(db.records) {
+			continue
+		}
+
+		record := db.records[id]
+		if !record.matches(opts.Filter) {
+			continue
+		}
+
+		distanceSquared := simd.SquaredL2(query, record.Vector)
+		if distanceSquared > maxDistance*maxDistance {
+			continue
+		}
+		distance := float32(math.Sqrt(float64(distanceSquared)))
+
+		results = append(results, Result{
+			Record:     copyRecord(record),
+			Distance:   distance,
+			Similarity: similarityFromMax(distance, boxDistance),
+		})
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Distance == results[j].Distance {
+			return results[i].Record.ID < results[j].Record.ID
+		}
+		return results[i].Distance < results[j].Distance
+	})
+
+	if len(results) > opts.TopK {
+		results = results[:opts.TopK]
+	}
+	return results, nil
+}
+
 func (db *DB) validateVector(vector []float32) error {
 	if len(vector) != db.dimensions {
 		return fmt.Errorf("dimension mismatch: expected %d, got %d", db.dimensions, len(vector))
@@ -199,6 +268,30 @@ func (db *DB) validateVector(vector []float32) error {
 	for dim, value := range vector {
 		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
 			return fmt.Errorf("dimension %d must be finite", dim)
+		}
+	}
+	return nil
+}
+
+func (db *DB) validateBoxOptions(opts BoxSearchOptions) error {
+	if len(opts.Minus) != db.dimensions {
+		return fmt.Errorf("minus dimension mismatch: expected %d, got %d", db.dimensions, len(opts.Minus))
+	}
+	if len(opts.Plus) != db.dimensions {
+		return fmt.Errorf("plus dimension mismatch: expected %d, got %d", db.dimensions, len(opts.Plus))
+	}
+	if opts.Threshold < 0 || opts.Threshold > 1 {
+		return fmt.Errorf("threshold must be in [0,1]")
+	}
+	if opts.TopK <= 0 {
+		return fmt.Errorf("topK must be positive")
+	}
+	for dim := 0; dim < db.dimensions; dim++ {
+		if math.IsNaN(float64(opts.Minus[dim])) || math.IsInf(float64(opts.Minus[dim]), 0) || opts.Minus[dim] < 0 {
+			return fmt.Errorf("minus[%d] must be finite and non-negative", dim)
+		}
+		if math.IsNaN(float64(opts.Plus[dim])) || math.IsInf(float64(opts.Plus[dim]), 0) || opts.Plus[dim] < 0 {
+			return fmt.Errorf("plus[%d] must be finite and non-negative", dim)
 		}
 	}
 	return nil
@@ -224,7 +317,10 @@ func (record Record) matches(filter *Filter) bool {
 }
 
 func similarity(distance float32, epsilon float32, dimensions int) float32 {
-	max := epsilon * float32(math.Sqrt(float64(dimensions)))
+	return similarityFromMax(distance, epsilon*float32(math.Sqrt(float64(dimensions))))
+}
+
+func similarityFromMax(distance float32, max float32) float32 {
 	if max == 0 {
 		if distance == 0 {
 			return 1
@@ -236,6 +332,18 @@ func similarity(distance float32, epsilon float32, dimensions int) float32 {
 		return 0
 	}
 	return score
+}
+
+func boxMaxDistance(minus []float32, plus []float32) float32 {
+	var sum float32
+	for dim := range minus {
+		bound := minus[dim]
+		if plus[dim] > bound {
+			bound = plus[dim]
+		}
+		sum += bound * bound
+	}
+	return float32(math.Sqrt(float64(sum)))
 }
 
 func copyRecord(record Record) Record {

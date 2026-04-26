@@ -69,6 +69,73 @@ func TestSearchFilter(t *testing.T) {
 	}
 }
 
+func TestSearchBox(t *testing.T) {
+	db, err := New(2)
+	if err != nil {
+		t.Fatalf("new db: %v", err)
+	}
+
+	for _, item := range []struct {
+		vector []float32
+		text   string
+	}{
+		{[]float32{0.0, 0.0}, "center"},
+		{[]float32{-0.2, 0.3}, "inside asymmetric box"},
+		{[]float32{0.2, 0.0}, "outside plus dim0"},
+		{[]float32{0.0, -0.1}, "outside minus dim1"},
+	} {
+		if _, err := db.Insert(item.vector, item.text, nil); err != nil {
+			t.Fatalf("insert %q: %v", item.text, err)
+		}
+	}
+
+	results, err := db.SearchBox([]float32{0, 0}, BoxSearchOptions{
+		Minus:     []float32{0.25, 0.05},
+		Plus:      []float32{0.10, 0.35},
+		Threshold: 0,
+		TopK:      10,
+	})
+	if err != nil {
+		t.Fatalf("search box: %v", err)
+	}
+
+	got := make([]string, len(results))
+	for i, result := range results {
+		got[i] = result.Record.Text
+	}
+	want := []string{"center", "inside asymmetric box"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("box results mismatch: got %v, want %v", got, want)
+	}
+}
+
+func TestSearchBoxThreshold(t *testing.T) {
+	db, err := New(2)
+	if err != nil {
+		t.Fatalf("new db: %v", err)
+	}
+
+	if _, err := db.Insert([]float32{0, 0}, "center", nil); err != nil {
+		t.Fatalf("insert center: %v", err)
+	}
+	if _, err := db.Insert([]float32{1, 0}, "edge", nil); err != nil {
+		t.Fatalf("insert edge: %v", err)
+	}
+
+	results, err := db.SearchBox([]float32{0, 0}, BoxSearchOptions{
+		Minus:     []float32{0, 0},
+		Plus:      []float32{1, 0},
+		Threshold: 0.5,
+		TopK:      10,
+	})
+	if err != nil {
+		t.Fatalf("search box: %v", err)
+	}
+	if len(results) != 1 || results[0].Record.Text != "center" {
+		t.Fatalf("expected threshold to exclude edge result: %+v", results)
+	}
+}
+
 func TestTimestampFilter(t *testing.T) {
 	db, err := New(1)
 	if err != nil {
@@ -113,6 +180,21 @@ func TestValidation(t *testing.T) {
 	}
 	if _, err := db.Search([]float32{1, 2}, SearchOptions{Epsilon: 1}); err == nil {
 		t.Fatal("expected topK validation")
+	}
+	if _, err := db.SearchBox([]float32{1, 2}, BoxSearchOptions{Minus: []float32{1}, Plus: []float32{1, 1}, TopK: 1}); err == nil {
+		t.Fatal("expected box minus dimension mismatch")
+	}
+	if _, err := db.SearchBox([]float32{1, 2}, BoxSearchOptions{Minus: []float32{1, 1}, Plus: []float32{1}, TopK: 1}); err == nil {
+		t.Fatal("expected box plus dimension mismatch")
+	}
+	if _, err := db.SearchBox([]float32{1, 2}, BoxSearchOptions{Minus: []float32{-1, 1}, Plus: []float32{1, 1}, TopK: 1}); err == nil {
+		t.Fatal("expected negative minus validation")
+	}
+	if _, err := db.SearchBox([]float32{1, 2}, BoxSearchOptions{Minus: []float32{1, 1}, Plus: []float32{1, 1}, Threshold: 2, TopK: 1}); err == nil {
+		t.Fatal("expected box threshold validation")
+	}
+	if _, err := db.SearchBox([]float32{1, 2}, BoxSearchOptions{Minus: []float32{1, 1}, Plus: []float32{1, 1}}); err == nil {
+		t.Fatal("expected box topK validation")
 	}
 }
 
