@@ -50,11 +50,22 @@ type BoxSearchOptions struct {
 	Filter    *Filter
 }
 
+// SoftBoxSearchOptions controls weighted soft box search.
+type SoftBoxSearchOptions struct {
+	Minus                    []float32
+	Plus                     []float32
+	Weights                  []float32
+	TopK                     int
+	Filter                   *Filter
+	TieBreakByAnchorDistance bool
+}
+
 // Result is one scored search hit.
 type Result struct {
 	Record     Record
 	Distance   float32
 	Similarity float32
+	Score      float32
 }
 
 // DB stores vectors and a skiplist-backed per-dimension index.
@@ -261,6 +272,69 @@ func (db *DB) SearchBox(query []float32, opts BoxSearchOptions) ([]Result, error
 	return results, nil
 }
 
+// SearchSoftBox ranks records by weighted distance outside an asymmetric box.
+//
+// Records inside the box have score 0. Records outside the box are scored as:
+//
+//	sum(weight_i * max(0, lower_i - x_i, x_i - upper_i)) / sum(weight_i)
+//
+// Lower scores are better. When TieBreakByAnchorDistance is true, equal scores
+// are ordered by Euclidean distance to query.
+func (db *DB) SearchSoftBox(query []float32, opts SoftBoxSearchOptions) ([]Result, error) {
+	if db == nil {
+		return nil, fmt.Errorf("nil database")
+	}
+	if err := db.validateVector(query); err != nil {
+		return nil, err
+	}
+	weightSum, err := db.validateSoftBoxOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	if len(db.records) == 0 {
+		return nil, nil
+	}
+
+	results := make([]Result, 0, minInt(opts.TopK, len(db.records)))
+	for i := range db.records {
+		record := db.records[i]
+		if !record.matches(opts.Filter) {
+			continue
+		}
+
+		score := softBoxScore(query, record.Vector, opts.Minus, opts.Plus, opts.Weights, weightSum)
+		result := Result{
+			Record:     copyRecord(record),
+			Score:      score,
+			Similarity: 1 / (1 + score),
+		}
+		if opts.TieBreakByAnchorDistance {
+			result.Distance = float32(math.Sqrt(float64(simd.SquaredL2(query, record.Vector))))
+		}
+		results = append(results, result)
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Score == results[j].Score {
+			if opts.TieBreakByAnchorDistance && results[i].Distance != results[j].Distance {
+				return results[i].Distance < results[j].Distance
+			}
+			return results[i].Record.ID < results[j].Record.ID
+		}
+		return results[i].Score < results[j].Score
+	})
+
+	if len(results) > opts.TopK {
+		results = results[:opts.TopK]
+	}
+	if !opts.TieBreakByAnchorDistance {
+		for i := range results {
+			results[i].Distance = float32(math.Sqrt(float64(simd.SquaredL2(query, results[i].Record.Vector))))
+		}
+	}
+	return results, nil
+}
+
 func (db *DB) validateVector(vector []float32) error {
 	if len(vector) != db.dimensions {
 		return fmt.Errorf("dimension mismatch: expected %d, got %d", db.dimensions, len(vector))
@@ -295,6 +369,43 @@ func (db *DB) validateBoxOptions(opts BoxSearchOptions) error {
 		}
 	}
 	return nil
+}
+
+func (db *DB) validateSoftBoxOptions(opts SoftBoxSearchOptions) (float32, error) {
+	if len(opts.Minus) != db.dimensions {
+		return 0, fmt.Errorf("minus dimension mismatch: expected %d, got %d", db.dimensions, len(opts.Minus))
+	}
+	if len(opts.Plus) != db.dimensions {
+		return 0, fmt.Errorf("plus dimension mismatch: expected %d, got %d", db.dimensions, len(opts.Plus))
+	}
+	if opts.Weights != nil && len(opts.Weights) != db.dimensions {
+		return 0, fmt.Errorf("weights dimension mismatch: expected %d, got %d", db.dimensions, len(opts.Weights))
+	}
+	if opts.TopK <= 0 {
+		return 0, fmt.Errorf("topK must be positive")
+	}
+
+	var weightSum float32
+	for dim := 0; dim < db.dimensions; dim++ {
+		if math.IsNaN(float64(opts.Minus[dim])) || math.IsInf(float64(opts.Minus[dim]), 0) || opts.Minus[dim] < 0 {
+			return 0, fmt.Errorf("minus[%d] must be finite and non-negative", dim)
+		}
+		if math.IsNaN(float64(opts.Plus[dim])) || math.IsInf(float64(opts.Plus[dim]), 0) || opts.Plus[dim] < 0 {
+			return 0, fmt.Errorf("plus[%d] must be finite and non-negative", dim)
+		}
+		weight := float32(1)
+		if opts.Weights != nil {
+			weight = opts.Weights[dim]
+			if math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) || weight < 0 {
+				return 0, fmt.Errorf("weights[%d] must be finite and non-negative", dim)
+			}
+		}
+		weightSum += weight
+	}
+	if weightSum == 0 {
+		return 0, fmt.Errorf("sum of weights must be positive")
+	}
+	return weightSum, nil
 }
 
 func (record Record) matches(filter *Filter) bool {
@@ -344,6 +455,35 @@ func boxMaxDistance(minus []float32, plus []float32) float32 {
 		sum += bound * bound
 	}
 	return float32(math.Sqrt(float64(sum)))
+}
+
+func softBoxScore(query []float32, vector []float32, minus []float32, plus []float32, weights []float32, weightSum float32) float32 {
+	var weightedViolation float32
+	for dim, x := range vector {
+		lower := query[dim] - minus[dim]
+		upper := query[dim] + plus[dim]
+
+		var violation float32
+		if x < lower {
+			violation = lower - x
+		} else if x > upper {
+			violation = x - upper
+		}
+
+		weight := float32(1)
+		if weights != nil {
+			weight = weights[dim]
+		}
+		weightedViolation += weight * violation
+	}
+	return weightedViolation / weightSum
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func copyRecord(record Record) Record {

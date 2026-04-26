@@ -40,3 +40,13 @@ per-dimension `Minus` and `Plus` widths, so dimension `d` searches:
 ```text
 query[d] - Minus[d] <= value <= query[d] + Plus[d]
 ```
+
+Soft box search scores every filtered record by weighted distance outside the
+box instead of requiring containment:
+
+```text
+score = sum(weight[d] * max(0, lower[d] - x[d], x[d] - upper[d])) / sum(weight)
+```
+
+Lower scores rank first, and callers can optionally break equal-score ties by
+anchor distance to the query vector.
